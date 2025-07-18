@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MongoDB Log Redaction Tool - Enhanced with Streaming Batch Processing
+MongoDB Log Redaction Tool - Enhanced with Streaming Batch Processing and tqdm Progress Bar
 Supports both on-premises (text format) and Atlas (JSON format) logs
 Optimized for large files (GBs) with memory-efficient streaming processing
 """
@@ -11,6 +11,15 @@ import sys
 import time
 from typing import Dict, Iterator, TextIO
 from pathlib import Path
+
+try:
+    from tqdm import tqdm
+
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    print("⚠️  tqdm library not found. Install with: pip install tqdm")
+    print("   Falling back to basic progress reporting.")
 
 try:
     import phonenumbers
@@ -265,7 +274,7 @@ class MongoLogRedactor:
             return f"{seconds / 3600:.1f}h"
 
     def redact_log_file_streaming(self, input_file: str, output_file: str = None) -> Dict:
-        """Main redaction function with streaming batch processing"""
+        """Main redaction function with streaming batch processing and tqdm progress bar"""
         input_path = Path(input_file)
 
         if not input_path.exists():
@@ -288,42 +297,81 @@ class MongoLogRedactor:
         start_time = time.time()
         batch_count = 0
 
-        # Process file in streaming batches
-        with open(input_file, 'r', encoding='utf-8') as input_f, \
-                open(output_file, 'w', encoding='utf-8') as output_f:
+        # Initialize progress bar
+        if TQDM_AVAILABLE:
+            # Use tqdm with bytes-based progress
+            progress_bar = tqdm(
+                total=file_size,
+                unit='B',
+                unit_scale=True,
+                unit_divisor=1024,
+                desc="🔒 Redacting",
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
+                colour='green'
+            )
+        else:
+            progress_bar = None
 
-            for batch_lines in self.read_lines_batch(input_f, self.batch_size):
-                batch_count += 1
-                batch_start = time.time()
+        try:
+            # Process file in streaming batches
+            with open(input_file, 'r', encoding='utf-8') as input_f, \
+                    open(output_file, 'w', encoding='utf-8') as output_f:
 
-                # Redact the batch
-                redacted_lines = self.redact_batch(batch_lines)
+                for batch_lines in self.read_lines_batch(input_f, self.batch_size):
+                    batch_count += 1
+                    batch_start = time.time()
 
-                # Write redacted batch to output
-                for line in redacted_lines:
-                    output_f.write(line + '\n')
+                    # Redact the batch
+                    redacted_lines = self.redact_batch(batch_lines)
 
-                # Update progress
-                lines_in_batch = len(batch_lines)
-                bytes_in_batch = sum(len(line.encode('utf-8')) for line in batch_lines)
+                    # Write redacted batch to output
+                    for line in redacted_lines:
+                        output_f.write(line + '\n')
 
-                self.total_lines_processed += lines_in_batch
-                self.total_bytes_processed += bytes_in_batch
+                    # Update progress
+                    lines_in_batch = len(batch_lines)
+                    bytes_in_batch = sum(len(line.encode('utf-8')) for line in batch_lines)
 
-                # Progress reporting
-                batch_time = time.time() - batch_start
-                total_time = time.time() - start_time
-                progress_pct = (self.total_bytes_processed / file_size) * 100
+                    self.total_lines_processed += lines_in_batch
+                    self.total_bytes_processed += bytes_in_batch
 
-                print(f"📦 Batch {batch_count:4d}: {lines_in_batch:6d} lines, "
-                      f"{self.format_bytes(bytes_in_batch):8s}, "
-                      f"{batch_time:.2f}s | "
-                      f"Progress: {progress_pct:.1f}% | "
-                      f"Total: {self.format_time(total_time)}")
+                    # Update progress bar
+                    if TQDM_AVAILABLE and progress_bar:
+                        # Calculate dynamic stats
+                        batch_time = time.time() - batch_start
+                        total_time = time.time() - start_time
+                        total_redactions = sum(self.redaction_stats.values())
 
-                # Flush output periodically for large files
-                if batch_count % 10 == 0:
-                    output_f.flush()
+                        # Update progress bar with current batch size
+                        progress_bar.update(bytes_in_batch)
+
+                        # Update postfix with detailed stats
+                        progress_bar.set_postfix({
+                            'Batch': f'{batch_count}',
+                            'Lines': f'{self.total_lines_processed:,}',
+                            'Redactions': f'{total_redactions:,}',
+                            'Batch/s': f'{batch_time:.2f}s'
+                        })
+                    else:
+                        # Fallback to original progress reporting
+                        batch_time = time.time() - batch_start
+                        total_time = time.time() - start_time
+                        progress_pct = (self.total_bytes_processed / file_size) * 100
+
+                        print(f"📦 Batch {batch_count:4d}: {lines_in_batch:6d} lines, "
+                              f"{self.format_bytes(bytes_in_batch):8s}, "
+                              f"{batch_time:.2f}s | "
+                              f"Progress: {progress_pct:.1f}% | "
+                              f"Total: {self.format_time(total_time)}")
+
+                    # Flush output periodically for large files
+                    if batch_count % 10 == 0:
+                        output_f.flush()
+
+        finally:
+            # Close progress bar
+            if TQDM_AVAILABLE and progress_bar:
+                progress_bar.close()
 
         total_time = time.time() - start_time
         throughput = self.total_bytes_processed / total_time if total_time > 0 else 0
@@ -382,6 +430,8 @@ def main():
         print("Usage: python logRedactor.py <input_file> [output_file] [batch_size]")
         print("Example: python logRedactor.py mongo.log mongo_redacted.log 5000")
         print("  batch_size: Number of lines per batch (default: 5000, recommended: 1000-10000)")
+        print("\nRequired dependencies:")
+        print("  pip install tqdm phonenumbers")
         sys.exit(1)
 
     input_file = sys.argv[1]
@@ -395,15 +445,21 @@ def main():
         print("⚠️  Warning: Very large batch size may cause memory issues")
 
     try:
-        print("🔒 MongoDB Log Redaction Tool - Streaming Edition")
-        print("=" * 50)
+        print("🔒 MongoDB Log Redaction Tool - Streaming Edition with Progress Bar")
+        print("=" * 70)
 
         redactor = MongoLogRedactor(batch_size=batch_size)
         summary = redactor.redact_log_file_streaming(input_file, output_file)
         redactor.print_summary(summary)
 
+        feature_status = []
+        if TQDM_AVAILABLE:
+            feature_status.append("📊 Enhanced with visual progress bar")
         if PHONENUMBERS_AVAILABLE:
-            print(f"🌍 Enhanced with international phone number detection")
+            feature_status.append("🌍 Enhanced with international phone number detection")
+
+        if feature_status:
+            print("\n" + " | ".join(feature_status))
 
     except KeyboardInterrupt:
         print("\n⚠️  Process interrupted by user")

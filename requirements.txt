@@ -1,10 +1,16 @@
-# MongoDB Log Redaction Tool Dependencies
+# MongoDB Log Redaction Tool Dependencies - Enhanced Edition
 #
-# Core dependency for international phone number detection and validation
+# Core dependencies for the MongoDB log redaction tool with visual progress tracking
+
+# Visual progress bar and processing indicators
+# Provides beautiful, real-time progress bars during log processing
+tqdm>=4.64.0
+
+# International phone number detection and validation
 # Uses Google's libphonenumber library for comprehensive country support
 phonenumbers>=8.12.0
 
-# Optional: For enhanced development and testing
+# Optional: Enhanced development and testing tools
 # Uncomment the following lines if you need development tools
 
 # Development dependencies (optional)
@@ -12,10 +18,22 @@ phonenumbers>=8.12.0
 # black>=22.0.0           # Code formatting
 # flake8>=4.0.0           # Code linting
 # mypy>=0.910             # Type checking
+# memory-profiler>=0.60.0 # Memory usage profiling for large files
+
+# Performance monitoring (optional)
+# psutil>=5.8.0           # System resource monitoring
+# line-profiler>=3.5.0    # Line-by-line performance profiling
 
 # Note: The following standard library modules are used but don't need installation:
 # - re (Regular expressions)
 # - json (JSON parsing)
 # - sys (System-specific parameters)
+# - time (Time-related functions)
 # - pathlib (Object-oriented filesystem paths)
 # - typing (Type hints)
+
+# Installation command:
+# pip install -r requirements.txt
+#
+# Or install core dependencies only:
+# pip install tqdm>=4.64.0 phonenumbers>=8.12.0
