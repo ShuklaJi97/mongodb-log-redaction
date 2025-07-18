@@ -20,7 +20,7 @@ def demo_redaction():
         from mongo_log_redactor import MongoLogRedactor
     except ImportError:
         print("Note: This demo requires the MongoLogRedactor class")
-        print("Run this alongside the main mongo_log_redactor.py file")
+        print("Run this alongside the main logRedactor.py file")
         return
 
     redactor = MongoLogRedactor()
@@ -82,8 +82,8 @@ def create_sample_files():
     print("  - sample_onprem.log (On-premises format)")
     print("  - sample_atlas.log (Atlas format)")
     print("\nTo test the redactor:")
-    print("  python mongo_log_redactor.py sample_onprem.log")
-    print("  python mongo_log_redactor.py sample_atlas.log")
+    print("  python logRedactor.py sample_onprem.log")
+    print("  python logRedactor.py sample_atlas.log")
 
 
 if __name__ == "__main__":
