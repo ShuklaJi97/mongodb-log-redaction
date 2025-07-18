@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-MongoDB Log Redaction Tool
+MongoDB Log Redaction Tool - Enhanced with Streaming Batch Processing
 Supports both on-premises (text format) and Atlas (JSON format) logs
-Enhanced with international phone number detection
+Optimized for large files (GBs) with memory-efficient streaming processing
 """
 
 import re
 import json
 import sys
-from typing import Dict
+import time
+from typing import Dict, Iterator, TextIO
 from pathlib import Path
 
 try:
@@ -23,7 +24,14 @@ except ImportError:
 
 
 class MongoLogRedactor:
-    def __init__(self):
+    def __init__(self, batch_size: int = 5000):
+        """
+        Initialize the redactor with configurable batch processing
+
+        Args:
+            batch_size: Number of lines to process in each batch (default: 5000)
+        """
+        self.batch_size = batch_size
         self.redaction_patterns = {
             # CRITICAL - Phone numbers (International detection)
             'phone_numbers': {
@@ -84,6 +92,10 @@ class MongoLogRedactor:
 
         # Cache for phone validation (performance optimization)
         self.phone_cache = {'valid': set(), 'invalid': set()}
+
+        # Progress tracking
+        self.total_lines_processed = 0
+        self.total_bytes_processed = 0
 
     def is_valid_phone_number(self, candidate: str) -> bool:
         """Validate if a string is a valid international phone number"""
@@ -184,19 +196,8 @@ class MongoLogRedactor:
 
         return re.sub(pattern, replacement_func, text, flags=re.IGNORECASE)
 
-    def detect_log_format(self, content: str) -> str:
-        """Detect if log is Atlas JSON format or on-premises text format"""
-        try:
-            first_line = content.strip().split('\n')[0]
-            json.loads(first_line)
-            return 'atlas'
-        except (json.JSONDecodeError, IndexError):
-            return 'onprem'
-
-    def redact_log_content(self, content: str, log_format: str) -> str:
-        """Apply redaction patterns to log content"""
-        print(f"Processing {log_format.upper()} log format...")
-
+    def redact_batch(self, lines: list) -> list:
+        """Apply redaction patterns to a batch of lines"""
         # Apply patterns in priority order
         priority_patterns = [
             'phone_numbers',  # CRITICAL
@@ -204,40 +205,145 @@ class MongoLogRedactor:
             'connection_ids', 'operation_ids', 'legacy_conn_ids', 'email_addresses'  # MEDIUM
         ]
 
-        redacted_content = content
-        for pattern_name in priority_patterns:
-            redacted_content = self.redact_text(redacted_content, pattern_name)
+        redacted_lines = []
+        for line in lines:
+            redacted_line = line
+            for pattern_name in priority_patterns:
+                redacted_line = self.redact_text(redacted_line, pattern_name)
+            redacted_lines.append(redacted_line)
 
-        return redacted_content
+        return redacted_lines
 
-    def redact_log_file(self, input_file: str, output_file: str = None) -> Dict:
-        """Main redaction function"""
+    def detect_log_format(self, file_path: str) -> str:
+        """Detect log format by reading first few lines"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for _ in range(5):  # Check first 5 lines
+                    line = f.readline().strip()
+                    if line:
+                        try:
+                            json.loads(line)
+                            return 'atlas'  # Found valid JSON
+                        except json.JSONDecodeError:
+                            continue
+                return 'onprem'  # No valid JSON found
+        except Exception:
+            return 'onprem'  # Default to on-prem format
+
+    def read_lines_batch(self, file_handle: TextIO, batch_size: int) -> Iterator[list]:
+        """Generator that yields batches of lines from file"""
+        batch = []
+        for line in file_handle:
+            batch.append(line.rstrip('\n\r'))
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+
+        # Yield remaining lines
+        if batch:
+            yield batch
+
+    def get_file_size(self, file_path: str) -> int:
+        """Get file size in bytes"""
+        return Path(file_path).stat().st_size
+
+    def format_bytes(self, bytes_size: int) -> str:
+        """Format bytes into human readable format"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if bytes_size < 1024.0:
+                return f"{bytes_size:.1f} {unit}"
+            bytes_size /= 1024.0
+        return f"{bytes_size:.1f} TB"
+
+    def format_time(self, seconds: float) -> str:
+        """Format seconds into human readable time"""
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        elif seconds < 3600:
+            return f"{seconds / 60:.1f}m"
+        else:
+            return f"{seconds / 3600:.1f}h"
+
+    def redact_log_file_streaming(self, input_file: str, output_file: str = None) -> Dict:
+        """Main redaction function with streaming batch processing"""
         input_path = Path(input_file)
 
         if not input_path.exists():
             raise FileNotFoundError(f"Input file not found: {input_file}")
 
-        # Read input file
-        with open(input_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-
-        # Detect format and apply redaction
-        log_format = self.detect_log_format(content)
-        redacted_content = self.redact_log_content(content, log_format)
+        # Get file info
+        file_size = self.get_file_size(input_file)
+        log_format = self.detect_log_format(input_file)
 
         # Determine output file
         if output_file is None:
             output_file = str(input_path.with_suffix('.redacted' + input_path.suffix))
 
-        # Write redacted content
-        with open(output_file, 'w', encoding='utf-8') as f:
-            f.write(redacted_content)
+        print(f"📁 Processing {log_format.upper()} log: {input_file}")
+        print(f"📊 File size: {self.format_bytes(file_size)}")
+        print(f"🔄 Batch size: {self.batch_size} lines")
+        print(f"💾 Output: {output_file}")
+        print(f"🚀 Starting streaming redaction...\n")
+
+        start_time = time.time()
+        batch_count = 0
+
+        # Process file in streaming batches
+        with open(input_file, 'r', encoding='utf-8') as input_f, \
+                open(output_file, 'w', encoding='utf-8') as output_f:
+
+            for batch_lines in self.read_lines_batch(input_f, self.batch_size):
+                batch_count += 1
+                batch_start = time.time()
+
+                # Redact the batch
+                redacted_lines = self.redact_batch(batch_lines)
+
+                # Write redacted batch to output
+                for line in redacted_lines:
+                    output_f.write(line + '\n')
+
+                # Update progress
+                lines_in_batch = len(batch_lines)
+                bytes_in_batch = sum(len(line.encode('utf-8')) for line in batch_lines)
+
+                self.total_lines_processed += lines_in_batch
+                self.total_bytes_processed += bytes_in_batch
+
+                # Progress reporting
+                batch_time = time.time() - batch_start
+                total_time = time.time() - start_time
+                progress_pct = (self.total_bytes_processed / file_size) * 100
+
+                print(f"📦 Batch {batch_count:4d}: {lines_in_batch:6d} lines, "
+                      f"{self.format_bytes(bytes_in_batch):8s}, "
+                      f"{batch_time:.2f}s | "
+                      f"Progress: {progress_pct:.1f}% | "
+                      f"Total: {self.format_time(total_time)}")
+
+                # Flush output periodically for large files
+                if batch_count % 10 == 0:
+                    output_f.flush()
+
+        total_time = time.time() - start_time
+        throughput = self.total_bytes_processed / total_time if total_time > 0 else 0
+
+        print(f"\n✅ Streaming redaction completed!")
+        print(f"⏱️  Total time: {self.format_time(total_time)}")
+        print(f"📈 Throughput: {self.format_bytes(throughput)}/s")
+        print(f"📊 Processed: {self.total_lines_processed:,} lines, {self.format_bytes(self.total_bytes_processed)}")
 
         # Generate summary
         return {
             'input_file': input_file,
             'output_file': output_file,
             'log_format': log_format,
+            'file_size': file_size,
+            'lines_processed': self.total_lines_processed,
+            'bytes_processed': self.total_bytes_processed,
+            'processing_time': total_time,
+            'throughput_bps': throughput,
+            'batches_processed': batch_count,
             'redaction_stats': {
                 name: {'count': count, 'description': self.redaction_patterns[name]['description']}
                 for name, count in self.redaction_stats.items() if count > 0
@@ -245,42 +351,63 @@ class MongoLogRedactor:
         }
 
     def print_summary(self, summary: Dict):
-        """Print redaction summary"""
-        print(f"\n{'=' * 60}")
+        """Print comprehensive redaction summary"""
+        print(f"\n{'=' * 70}")
         print("REDACTION SUMMARY")
-        print(f"{'=' * 60}")
+        print(f"{'=' * 70}")
         print(f"Input File: {summary['input_file']}")
         print(f"Output File: {summary['output_file']}")
         print(f"Log Format: {summary['log_format'].upper()}")
+        print(f"File Size: {self.format_bytes(summary['file_size'])}")
+        print(f"Lines Processed: {summary['lines_processed']:,}")
+        print(f"Processing Time: {self.format_time(summary['processing_time'])}")
+        print(f"Throughput: {self.format_bytes(summary['throughput_bps'])}/s")
+        print(f"Batches: {summary['batches_processed']}")
 
         if summary['redaction_stats']:
             print(f"\nRedaction Statistics:")
+            total_redactions = sum(stats['count'] for stats in summary['redaction_stats'].values())
+            print(f"Total items redacted: {total_redactions:,}")
+            print("-" * 50)
             for name, stats in summary['redaction_stats'].items():
-                print(f"  {name}: {stats['count']} items - {stats['description']}")
+                print(f"  {name}: {stats['count']:,} items - {stats['description']}")
         else:
             print("\nNo sensitive data found to redact.")
+
+        print(f"\n🔒 Sensitive data successfully redacted while preserving log structure!")
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python mongo_log_redactor.py <input_file> [output_file]")
-        print("Example: python mongo_log_redactor.py mongo.log mongo_redacted.log")
+        print("Usage: python logRedactor.py <input_file> [output_file] [batch_size]")
+        print("Example: python logRedactor.py mongo.log mongo_redacted.log 5000")
+        print("  batch_size: Number of lines per batch (default: 5000, recommended: 1000-10000)")
         sys.exit(1)
 
     input_file = sys.argv[1]
     output_file = sys.argv[2] if len(sys.argv) > 2 else None
+    batch_size = int(sys.argv[3]) if len(sys.argv) > 3 else 5000
+
+    # Validate batch size
+    if batch_size < 100:
+        print("⚠️  Warning: Very small batch size may impact performance")
+    elif batch_size > 50000:
+        print("⚠️  Warning: Very large batch size may cause memory issues")
 
     try:
-        redactor = MongoLogRedactor()
-        summary = redactor.redact_log_file(input_file, output_file)
-        redactor.print_summary(summary)
+        print("🔒 MongoDB Log Redaction Tool - Streaming Edition")
+        print("=" * 50)
 
-        print(f"\n✅ Redaction completed successfully!")
-        print(f"📁 Redacted log saved to: {summary['output_file']}")
+        redactor = MongoLogRedactor(batch_size=batch_size)
+        summary = redactor.redact_log_file_streaming(input_file, output_file)
+        redactor.print_summary(summary)
 
         if PHONENUMBERS_AVAILABLE:
             print(f"🌍 Enhanced with international phone number detection")
 
+    except KeyboardInterrupt:
+        print("\n⚠️  Process interrupted by user")
+        sys.exit(1)
     except Exception as e:
         print(f"❌ Error: {e}")
         sys.exit(1)
