@@ -72,10 +72,10 @@ def create_sample_files():
 {"t":{"$date":"2025-07-16T05:19:38.920+00:00"},"s":"I","c":"NETWORK","id":22943,"ctx":"listener","msg":"Connection accepted","attr":{"remote":"192.168.248.116:52366","isLoadBalanced":false,"uuid":{"uuid":{"$uuid":"ac7e5a08-53b5-4b6f-87bf-8d9d1f99b7a2"}},"connectionId":15193,"connectionCount":83}}'''
 
     # Write sample files
-    with open('sample_onprem.log', 'w') as f:
+    with open('logs/sample_onprem.log', 'w') as f:
         f.write(onprem_sample)
 
-    with open('sample_atlas.log', 'w') as f:
+    with open('logs/sample_atlas.log', 'w') as f:
         f.write(atlas_sample)
 
     print("Sample files created:")
